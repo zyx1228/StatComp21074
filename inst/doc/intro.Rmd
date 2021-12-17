@@ -1,0 +1,177 @@
+---
+title: "Introduction to StatComp21074"
+author: "Yuxin Zhang"
+date: "`r Sys.Date()`"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Introduction to StatComp21074}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+## Overview
+
+__StatComp21074__ is a simple Rpackage based on Zhu's research on network vector autoregression, which contains some simple functions to realize the numerical simulation in the paper.  
+
+It is assumed that the node generation obeys the power-law distribution. According to the limitation of each parameter in the paper, functions such as _Z、W、statMu、statGamma、Y_ are segmented to achieve corresponding functions. _simudata_ is used to generate the simulated data, and _est_ is used to estimate the coefficients of the network autoregressive model.  
+
+In this R package 'dPlyr' 'Plyr' 'Matrix' 'MASS' 'poweRlaw' will all be used.  
+
+
+## simudata()
+
+The source R code for _simudata_ is as follows: 
+
+```{r,eval=FALSE}
+#### Our function1 
+simudata <- function(beta0, Beta, gamma0, Time, sig = 1, N, alpha) {
+  W = W(N, alpha)
+  p=length(gamma0)
+  Z = Z(N, p)
+  G = Beta[1]*W + Beta[2]*diag(nrow(W))
+  mu = statMu(G, beta0 + Z %*% gamma0)
+  Gamma0 = statGamma(G, sigma = sig)
+  Y0 = mvrnorm(n = 1, mu = mu, Sigma = Gamma0)
+  Ysim = Y(Y0 = Y0, beta0 + Z %*% gamma0, Beta, W, Time = Time)
+  return(Ysim)
+}
+``` 
+
+
+The built-in function W()、Z()、statMu()、statGamma()、Y() are also used in the generation of simulated data. Their R codes are shown below:  
+  
+Step 1: obtain network matrix W from power-law distribution  
+
+```{r,eval=FALSE}
+W <- function(N, alpha) {
+  Numfollowers = rpldis(N, 1, alpha)  # generate random numbers for each nodes following power-law(1, alpha)
+  A = sapply(Numfollowers, function(n) {
+    # for node i, randomly select di nodes to follow it
+    sel = rep(0, N)
+    sel[sample(1:N, min(n, N))] = 1
+    return(sel)
+  })
+  diag(A) = 0
+  for (i in 1:N){
+    if (sum(A[i,]) == 0)         # in case some row sums are zero
+      A[i,sample(1:N,3)] = 1   # for those node, randomly select 3 followees
+  }
+  W = A / rowSums(A) # row-normalized adjacency matrix
+  return(W)
+} 
+```  
+
+Step 2: generate node-specific random vector Z  
+
+```{r,eval=FALSE}
+Z <- function(N, p, s = 0.5) {
+  cov = diag(p)  # Set covariance matrix with the element of 0.5 ^ | i - j | 
+  for (i in 1:(p-1)){
+    for (j in (i+1):p){
+      cov[i,j] = s^abs(i-j)
+    }
+  }
+  cov = t(cov)+cov
+  diag(cov)=1
+  Z = mvrnorm(N, mu = rep(0,p), Sigma = cov) 
+  return(Z)
+}
+```  
+
+Step 3: generate simulation data  
+step 3.1: We need to calculate the mean and covariance of the stationary state to sample the initial state Y0.  
+
+```{r,eval=FALSE}
+#using proposition1 and Case3 to obtain the mean and covariance matrix of stationary time series
+statMu <- function(G, Beta0) {
+  mu = solve(diag(length(Beta0)) - G) %*% Beta0  
+  return(mu)
+}
+statGamma <- function(G, sigma) {
+  Gamma0 = (diag(nrow(G)) + tcrossprod(G) + tcrossprod(G %*% G) + tcrossprod(G %*% G %*% G)) * sigma^2
+  # Tayler expansion in case3
+  return(Gamma0)
+} 
+```  
+
+step3.2: function for simulationg Y series  
+
+```{r,eval=FALSE}
+Y <- function(Y0, Beta0, Beta, W, sig = 1, Time) {
+  Ysim = matrix(0, nrow = length(Beta0), ncol = Time + 1)  # use Ysim to store the simulated data
+  Ysim[, 1] = as.vector(Y0)  # the first column of Ysim holds Y0
+  for (i in 1:Time) {
+    Ysim[, i + 1] = as.vector(Beta0 + Beta[1] * W %*% Ysim[, i] + Beta[2] * 
+                                Ysim[, i] + rnorm(length(Beta0), sd = sig))  # simulate
+  }
+  return(Ysim)
+}
+```  
+
+
+
+
+## est()
+
+The source R code for _est_ is as follows:  
+
+```{r,eval=FALSE}
+# The function requires the user to obtain simulated data 
+# and then input it as a parameter to the est()
+est <- function(Ysim, N, alpha, p){
+  W = W(N, alpha)
+  
+  Z = Z(N, p)
+  WY = W %*% Ysim  # WY
+  Time = ncol(Ysim) - 1  # cause Ysim included Y0
+  
+  # Joining together the X
+  int = rep(1, nrow(Ysim) * Time)
+  self = as.vector(WY[, -ncol(Ysim)])
+  other = as.vector(Ysim[, -ncol(Ysim)])
+  realz = matrix(0, nrow = N*Time, ncol = p)
+  for (i in seq(1, N*Time,N)){
+    realz[i:(i+N-1),] = Z
+  }
+  
+  X = as.matrix(bind_cols(int, self, other, realz))
+  invXX = solve(crossprod(X)) 
+  Y = as.vector(Ysim[, -1])  
+  
+  thetahat = invXX %*% t(X) %*% Y  # estimation equation (2.8)
+  return(list(theta = thetahat))
+}
+```
+
+In order to empirically use _simudata_ and _est_, one generates 30 observations of 50 nodes respectively. The R code for empirically use  _simudata_ and _est_ are as follows.
+
+```{r}
+library(dplyr)
+library(plyr)
+library(Matrix)
+library(MASS)
+library(poweRlaw)
+library(StatComp21074)
+
+N = 50  #numbers of nodes
+alpha = 1.2  #parameter of power-law
+Time = 30   #The length of time
+gamma0 = c(-0.5,0.3,0.8,0,0) #fixed parameter of Z
+p = length(gamma0)
+beta0 = rep(0.3,N) #Intercept term coefficient
+Beta = c(0.1,0.5)  #Regression coefficient
+Ysim = simudata(beta0, Beta, gamma0, Time, sig = 1, N, alpha)
+est(Ysim,N,alpha,p)
+```
+
+The above results show the estimate value of coefficients.
+
+
+
+
